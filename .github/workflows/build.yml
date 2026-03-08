@@ -1,0 +1,136 @@
+name: Build & Release
+
+# ───────────────────────────────────────────────────────────────
+#  언제 실행되나?
+#   • Actions 탭 → Run workflow  (수동 빌드, Artifacts로 다운로드)
+#   • git tag v1.0.0 push        (자동 빌드 + GitHub Release 생성)
+# ───────────────────────────────────────────────────────────────
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: robobloq_ambient.exe  (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+
+    # ── 1. 소스 체크아웃 ────────────────────────────────────────
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # ── 2. Python 3.11  64-bit ──────────────────────────────────
+    - name: Setup Python 3.11 x64
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        architecture: "x64"
+
+    # ── 3. pip 업그레이드 + 패키지 설치 ────────────────────────
+    #   hidapi   → Windows용 HID 라이브러리 (hidapi.dll 포함)
+    #              ※ "hid" 패키지는 Linux 전용이므로 사용 금지
+    #   Pillow   → 화면 캡처
+    #   pyinstaller → .exe 빌드
+    - name: Install packages
+      shell: pwsh
+      run: |
+        python -m pip install --upgrade pip
+        pip install hidapi Pillow pyinstaller
+
+    # ── 4. hidapi DLL 경로 확인 (PyInstaller에 전달) ───────────
+    - name: Find hidapi.dll
+      id: hidapi
+      shell: pwsh
+      run: |
+        # hidapi 패키지 폴더 안의 .dll 파일을 찾는다
+        $pkg = python -c "import hid, os; print(os.path.dirname(os.path.abspath(hid.__file__)))"
+        Write-Host "hidapi package dir: $pkg"
+
+        $dll = Get-ChildItem -Path $pkg -Filter "*.dll" | Select-Object -First 1
+        if (-not $dll) {
+          Write-Error "hidapi.dll not found in $pkg"
+          exit 1
+        }
+
+        Write-Host "Found DLL: $($dll.FullName)"
+        echo "dll=$($dll.FullName)" >> $env:GITHUB_OUTPUT
+
+        # import 동작 확인
+        python -c "import hid; print('hidapi import OK')"
+
+    # ── 5. PyInstaller 빌드 ─────────────────────────────────────
+    - name: Build exe
+      shell: pwsh
+      run: |
+        $dll = "${{ steps.hidapi.outputs.dll }}"
+        Write-Host "Bundling: $dll"
+
+        pyinstaller `
+          --onefile `
+          --name robobloq_ambient `
+          --add-binary "$dll;." `
+          --hidden-import hid `
+          --hidden-import PIL `
+          --hidden-import PIL.Image `
+          --hidden-import PIL.ImageGrab `
+          --hidden-import PIL._tkinter_finder `
+          --collect-all hid `
+          --noconfirm `
+          robobloq_ambient.py
+
+    # ── 6. 결과 확인 ────────────────────────────────────────────
+    - name: Verify exe
+      shell: pwsh
+      run: |
+        $f = "dist\robobloq_ambient.exe"
+        if (Test-Path $f) {
+          $mb = [math]::Round((Get-Item $f).Length / 1MB, 1)
+          Write-Host "OK: robobloq_ambient.exe  ($mb MB)"
+        } else {
+          Write-Error "FAILED: exe not found"
+          exit 1
+        }
+
+    # ── 7. Artifact 업로드 (태그 없어도 항상 저장) ─────────────
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: robobloq_ambient-windows-x64
+        path: dist\robobloq_ambient.exe
+        retention-days: 30
+
+    # ── 8. GitHub Release (태그 push 시에만) ────────────────────
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "Robobloq Ambient ${{ github.ref_name }}"
+        body: |
+          ## Robobloq Ambient Light ${{ github.ref_name }}
+
+          ### 📥 다운로드
+          `robobloq_ambient.exe` — Windows 11 64-bit, 별도 설치 불필요
+
+          ### 🚀 사용법
+          ```
+          robobloq_ambient.exe                   # ambient 모드 (화면 캡처)
+          robobloq_ambient.exe --demo            # 무지개 데모
+          robobloq_ambient.exe --brightness 180  # 밝기 1-255
+          robobloq_ambient.exe --smoothing 0.5   # 부드러움 0.0-1.0
+          robobloq_ambient.exe --fps 60          # FPS 설정
+          robobloq_ambient.exe --list-devices    # HID 장치 목록
+          ```
+
+          ### ⚠️ SmartScreen 경고 시
+          **추가 정보 → 실행** 클릭
+        files: dist/robobloq_ambient.exe
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
