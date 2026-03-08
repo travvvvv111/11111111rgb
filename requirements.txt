@@ -1,0 +1,8 @@
+# Windows 11 64-bit
+# pip install -r requirements.txt
+
+# ※ 반드시 "hidapi" 사용 — "hid"는 Windows에서 DLL 없어 동작 안 함
+hidapi
+
+# 화면 캡처 (ambient 모드에 필요)
+Pillow
