@@ -1,0 +1,134 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Create a GitHub Release?"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build (Windows 11 x64)
+    runs-on: windows-latest          # Windows Server 2022 / Win11-compatible
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python 3.11 64-bit ───────────────────────────────
+      - name: Set up Python 3.11 (64-bit)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      # ── 3. Cache pip ───────────────────────────────────────────────
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # ── 4. Install dependencies ────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # ── 5. Install HIDAPI runtime DLL (Windows) ────────────────────
+      #   hidapi wheel bundles the DLL, but PyInstaller needs it collected
+      - name: Verify hidapi DLL availability
+        run: |
+          python -c "import hid; print('hidapi OK, version:', hid.__version__)"
+
+      # ── 6. Build with PyInstaller ──────────────────────────────────
+      - name: Build executable with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --name robobloq_ambient `
+            --icon assets\icon.ico `
+            --add-binary "$(python -c "import hid, os; print(os.path.dirname(hid.__file__))")\hidapi.dll;." `
+            --hidden-import PIL._tkinter_finder `
+            --collect-submodules hid `
+            --collect-data hid `
+            robobloq_ambient.py
+        continue-on-error: false
+
+      # ── 6b. Fallback build (no icon, in case assets/icon.ico missing)
+      - name: Fallback build (no icon)
+        if: failure()
+        run: |
+          pyinstaller `
+            --onefile `
+            --name robobloq_ambient `
+            --add-binary "$(python -c "import hid, os; print(os.path.dirname(hid.__file__))")\hidapi.dll;." `
+            --hidden-import PIL._tkinter_finder `
+            --collect-submodules hid `
+            --collect-data hid `
+            robobloq_ambient.py
+
+      # ── 7. Smoke test: check the exe exists ───────────────────────
+      - name: Verify executable
+        run: |
+          if (Test-Path "dist\robobloq_ambient.exe") {
+            Write-Output "✅ robobloq_ambient.exe built successfully"
+            Get-Item "dist\robobloq_ambient.exe" | Select-Object Name, Length, LastWriteTime
+          } else {
+            Write-Error "❌ robobloq_ambient.exe not found"
+            exit 1
+          }
+
+      # ── 8. Upload artifact (always, not just on tag) ───────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: robobloq_ambient-windows-x64
+          path: dist\robobloq_ambient.exe
+          retention-days: 30
+
+      # ── 9. Create GitHub Release (only on tag push) ────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Robobloq Ambient Light ${{ github.ref_name }}"
+          body: |
+            ## Robobloq Ambient Light Controller ${{ github.ref_name }}
+
+            ### 📥 Download
+            - **`robobloq_ambient.exe`** — Windows 11 64-bit, self-contained (no Python needed)
+
+            ### 🚀 Usage
+            ```
+            robobloq_ambient.exe                     # Ambient screen-capture mode
+            robobloq_ambient.exe --demo              # Rainbow demo (no screen needed)
+            robobloq_ambient.exe --brightness 180    # Set brightness (1-255)
+            robobloq_ambient.exe --smoothing 0.5     # Color smoothing (0.0-1.0)
+            robobloq_ambient.exe --fps 60            # Target FPS (1-120)
+            ```
+
+            ### ⚠️ First Run
+            Windows may show a SmartScreen warning — click **"More info" → "Run anyway"**.
+            The exe is built from this repo's source with no external code.
+
+            ### 🔌 Device
+            Plug in your Robobloq Monitor Light Strip before running.
+          draft: false
+          prerelease: false
+          files: |
+            dist/robobloq_ambient.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
